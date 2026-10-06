@@ -88,6 +88,17 @@ the native port and stops reconnecting until you switch it back on.
 "started debugging this browser" bar. The other tools leave no mark beyond the
 badge and the popup log.
 
+## Keyboard shortcuts
+
+| Shortcut (macOS / other) | Action |
+|--------------------------|--------|
+| `⌘J` / `Alt+J` | Previous tab (wraps around) |
+| `⌘K` / `Alt+K` | Next tab (wraps around) |
+
+They work everywhere, including the new tab page, and keep working while the
+kill switch is off. `⌘J` replaces Chrome's Downloads shortcut. Rebind or clear
+them at `chrome://extensions/shortcuts`.
+
 ## Security
 
 Be clear about what this is: a remote control for every site you are logged in

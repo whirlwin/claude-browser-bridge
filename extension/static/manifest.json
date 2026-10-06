@@ -23,6 +23,22 @@
       "32": "icons/icon32.png"
     }
   },
+  "commands": {
+    "previous-tab": {
+      "suggested_key": {
+        "default": "Alt+J",
+        "mac": "Command+J"
+      },
+      "description": "Switch to the previous tab"
+    },
+    "next-tab": {
+      "suggested_key": {
+        "default": "Alt+K",
+        "mac": "Command+K"
+      },
+      "description": "Switch to the next tab"
+    }
+  },
   "permissions": [
     "nativeMessaging",
     "tabs",

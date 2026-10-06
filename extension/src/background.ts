@@ -13,6 +13,7 @@ import { detachAll, initDebugger } from "./debugger";
 import { dispatch } from "./dispatcher";
 import { isEnabled } from "./enabled";
 import { handlers } from "./methods/index";
+import { initShortcuts } from "./shortcuts";
 import type { Response } from "./protocol";
 
 const RETRY_ALARM = "reconnect";
@@ -179,6 +180,7 @@ async function setStatus(status: Status): Promise<void> {
 // Listeners are registered synchronously at top level so their events can wake
 // a suspended worker.
 initDebugger();
+initShortcuts();
 chrome.runtime.onStartup.addListener(() => void start());
 chrome.runtime.onInstalled.addListener(() => void start());
 chrome.alarms.onAlarm.addListener((alarm) => {
