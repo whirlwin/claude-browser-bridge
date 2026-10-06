@@ -1,17 +1,20 @@
 // stdout is a protocol channel in both modes (native messaging framing or
 // MCP over stdio). Everything human-readable must go to stderr.
+import { runHost } from "./host";
+import { runMcp } from "./mcp";
 import { USAGE, parseMode } from "./mode";
 
 function main(): void {
   const mode = parseMode(process.argv.slice(2));
   switch (mode) {
     case "host":
-      process.stderr.write("cbb host: not implemented yet\n");
-      process.exitCode = 1;
+      runHost();
       return;
     case "mcp":
-      process.stderr.write("cbb mcp: not implemented yet\n");
-      process.exitCode = 1;
+      runMcp().catch((error: unknown) => {
+        process.stderr.write(`cbb mcp: ${(error as Error).message}\n`);
+        process.exitCode = 1;
+      });
       return;
     case undefined:
       process.stderr.write(USAGE);
