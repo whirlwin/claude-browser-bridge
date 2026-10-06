@@ -92,12 +92,13 @@ badge and the popup log.
 
 | Shortcut (macOS / other) | Action |
 |--------------------------|--------|
-| `⌘J` / `Alt+J` | Previous tab (wraps around) |
-| `⌘K` / `Alt+K` | Next tab (wraps around) |
+| `⌘J` / `Alt+J` | Next tab, one down (wraps around) |
+| `⌘K` / `Alt+K` | Previous tab, one up (wraps around) |
 
 They work everywhere, including the new tab page, and keep working while the
 kill switch is off. `⌘J` replaces Chrome's Downloads shortcut. Rebind or clear
-them at `chrome://extensions/shortcuts`.
+them at `chrome://extensions/shortcuts`. Chrome applies these defaults only on
+first install; after an update that changes them, set them there by hand.
 
 ## Security
 

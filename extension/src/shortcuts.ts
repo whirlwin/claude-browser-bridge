@@ -3,8 +3,8 @@
 // kill switch is off.
 
 export const SHORTCUT_STEPS: Record<string, number> = {
-  "previous-tab": -1,
-  "next-tab": 1,
+  "select-previous-tab": -1,
+  "select-next-tab": 1,
 };
 
 // Index of the tab `step` places away from `current`, wrapping at both ends.

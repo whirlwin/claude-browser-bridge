@@ -24,19 +24,19 @@
     }
   },
   "commands": {
-    "previous-tab": {
+    "select-next-tab": {
       "suggested_key": {
         "default": "Alt+J",
         "mac": "Command+J"
       },
-      "description": "Switch to the previous tab"
+      "description": "Switch to the next tab"
     },
-    "next-tab": {
+    "select-previous-tab": {
       "suggested_key": {
         "default": "Alt+K",
         "mac": "Command+K"
       },
-      "description": "Switch to the next tab"
+      "description": "Switch to the previous tab"
     }
   },
   "permissions": [
