@@ -96,9 +96,52 @@ badge and the popup log.
 | `⌘K` / `Alt+K` | Previous tab, one up (wraps around) |
 
 They work everywhere, including the new tab page, and keep working while the
-kill switch is off. `⌘J` replaces Chrome's Downloads shortcut. Rebind or clear
-them at `chrome://extensions/shortcuts`. Chrome applies these defaults only on
-first install; after an update that changes them, set them there by hand.
+kill switch is off. `⌘J` replaces Chrome's Downloads shortcut.
+
+The bindings in the manifest are only defaults that Chrome applies on first
+install. The source of truth is the `shortcuts` section of
+[`chrome.yaml`](chrome.yaml): change them there and run
+`scripts/chrome-apply.sh` (see [Declarative Chrome config](#declarative-chrome-config)).
+Rebinding them by hand at `chrome://extensions/shortcuts` works too, but the
+next apply puts the `chrome.yaml` values back.
+
+## Declarative Chrome config
+
+[`chrome.yaml`](chrome.yaml) declares Chrome preferences and extension keyboard
+shortcuts; `scripts/chrome-apply.sh` makes Chrome match it:
+
+```yaml
+settings:
+  vertical_tabs.enabled: true        # pref name as chrome://settings stores it
+shortcuts:
+  Claude Browser Bridge:             # extension name, exactly as installed
+    select-next-tab: Command+J       # command name: manifest-style keybinding
+```
+
+```sh
+scripts/chrome-apply.sh                       # apply chrome.yaml
+scripts/chrome-apply.sh --dry-run             # show what would change, change nothing
+scripts/chrome-apply.sh --list-settings tabs  # pref names and current values matching a regex
+scripts/chrome-apply.sh other.yaml            # apply another file
+```
+
+It is idempotent: each line reports `unchanged` or `changed` (old -> new), and
+only differing values are written and then read back. Values keep their YAML
+type (booleans, numbers, strings, lists, maps). An unknown pref, extension or
+command is reported, the rest is still applied, and the exit status is non-zero.
+Keybindings use the manifest format (`Command+J`, `Alt+Shift+K`, `MacCtrl+L`;
+on macOS `Ctrl` means Command); an empty value clears a shortcut.
+
+Requirements: macOS, `yq` (`mise install` in this repo), Google Chrome already
+running (the script never launches it) and **View > Developer > Allow
+JavaScript from Apple Events** turned on in Chrome. It applies to the profile
+of the front Chrome window.
+
+It does not use the bridge. It drives Chrome through AppleScript: it opens
+`chrome://settings` and `chrome://extensions/shortcuts` as background tabs,
+calls the private APIs those pages expose (`chrome.settingsPrivate`,
+`chrome.developerPrivate`) with `execute javascript`, and closes the tabs again
+(only the ones it opened).
 
 ## Security
 
