@@ -27,7 +27,9 @@ a stray `console.log` corrupts the framing.
   any process running as you can connect.
 - The newest host wins: on startup the host unlinks any existing socket and binds.
   On exit (Chrome closed the port, stdin EOF) it unlinks the socket only if it
-  still owns it (inode check).
+  still owns it (inode check). "Newest wins" only applies to new connections:
+  an MCP client already connected to an older host (say, another Chrome
+  profile) keeps talking to it until that connection drops.
 - No socket, or connection refused, means "browser not connected".
 - Multiple MCP clients may connect at once. The host rewrites request ids to
   `<clientNumber>:<id>` before forwarding and restores them on the way back.
@@ -64,7 +66,9 @@ screenshots are fine.
 
 Error codes: `not_connected`, `too_large`, `bad_request`, `not_found`,
 `unavailable` (API missing or disabled, message explains how to enable it),
-`disabled` (kill switch on), `internal`.
+`disabled` (kill switch on), `internal`, and `timeout`. `timeout` is produced
+on the MCP side when the host never answered (30 s by default, 120 s for
+`page_eval` with `awaitPromise`); it never travels over the socket.
 
 ## Methods
 
@@ -107,8 +111,24 @@ One tool per method, named with underscores (`tabs_list`, `page_eval`,
 `net_rules_add`, `chrome_call`, ...). `page_screenshot` returns an MCP image
 content block; everything else returns JSON text.
 
+`bridge_status` (method `bridge.status`) is answered by the host itself:
+`{ connected: true, hello }`. The host only runs while Chrome holds its port, so
+when no host is listening (no socket, or connection refused) the MCP server
+returns a normal, non-error result `{ "connected": false, "message": "..." }`,
+so Claude can tell "not connected" apart from a failure.
+
 ## Kill switch
 
 The popup toggles `enabled` in `chrome.storage.local`. When disabled the
 extension detaches all debugger sessions, disconnects the native port, does not
-reconnect, and the badge shows `OFF`. While connected the badge shows `ON`.
+reconnect, and the badge shows `OFF`. While connected the badge shows `ON`, and
+`...` while it waits to reconnect.
+
+The popup and the service worker never message each other directly; they
+communicate through `chrome.storage`. The popup writes `enabled` to
+`storage.local`; the worker publishes its connection status and a log of recent
+commands to `storage.session`, which the popup reads and watches.
+
+Reconnects back off with a `setTimeout`, backed by a `chrome.alarms` alarm
+(hence the `alarms` permission) because an idle MV3 worker can be suspended and
+lose its timers.
