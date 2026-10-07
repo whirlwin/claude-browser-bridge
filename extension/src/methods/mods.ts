@@ -2,6 +2,7 @@ import { BridgeError, errorMessage } from "../protocol";
 import type { HandlerMap } from "../protocol";
 import { userScriptsHint } from "../constants";
 import { oneOf, str, strList } from "../params";
+import { enableUserScriptMessaging } from "../userScriptMessages";
 
 // chrome.userScripts is undefined without the "Allow User Scripts" toggle on
 // older Chrome, and throws from its methods on newer Chrome. Probe both.
@@ -50,6 +51,8 @@ export const modsMethods: HandlerMap = {
         // Chrome rejects invalid match patterns, bad code and the like: caller input.
         throw new BridgeError("bad_request", errorMessage(error));
       }
+      // The toggle may have been switched on since the worker started.
+      enableUserScriptMessaging();
       return {};
     });
   },

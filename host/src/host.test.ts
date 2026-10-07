@@ -1,7 +1,7 @@
 // Runs the real bundled `cbb host` as a child process, playing Chrome on its
 // stdin/stdout and MCP servers on its socket.
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -62,9 +62,9 @@ interface Host {
   exited: Promise<number | null>;
 }
 
-async function startHost(socketPath: string): Promise<Host> {
+async function startHost(socketPath: string, env: NodeJS.ProcessEnv = {}): Promise<Host> {
   const child = spawn(process.execPath, [binary, "host", "chrome-extension://test/"], {
-    env: { ...process.env, CBB_SOCKET: socketPath },
+    env: { ...process.env, CBB_SOCKET: socketPath, ...env },
   });
   const fromHost = new Inbox();
   const decoder = new MessageDecoder();
@@ -274,5 +274,110 @@ describe("cbb mcp process", () => {
     expect(await exited).toBe(0);
     host.child.stdin.end();
     expect(await host.exited).toBe(0);
+  });
+});
+
+/** A fake osascript that records its argv, NUL-separated, then exits with `code`. */
+function fakeOsascript(dir: string, code = 0): { path: string; argv: () => string[] } {
+  const path = join(dir, "osascript");
+  const record = join(dir, "argv");
+  writeFileSync(path, `#!/bin/sh\nprintf '%s\\0' "$@" > '${record}'\necho 'boom from osascript' >&2\nexit ${code}\n`);
+  chmodSync(path, 0o755);
+  return { path, argv: () => readFileSync(record, "utf8").split("\0").slice(0, -1) };
+}
+
+describe("extension-initiated requests", () => {
+  it("serves claude.spawn and rejects other methods", async () => {
+    const socketPath = newSocketPath();
+    const appDir = dirname(socketPath);
+    const home = mkdtempSync(join(tmpdir(), "cbb-home-"));
+    const project = mkdtempSync(join(tmpdir(), "cbb-proj-"));
+    mkdirSync(appDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(appDir, "config.json"), JSON.stringify({ claude: { cwd: project } }));
+    const fake = fakeOsascript(home);
+    const host = await startHost(socketPath, { CBB_OSASCRIPT: fake.path, HOME: home });
+
+    host.toHost({ id: "x-1", method: "claude.spawn", params: { prompt: "Summarize", email: { subject: "Hi", body: "b" }, origin: "https://outlook.office.com" } });
+    expect(await host.fromHost.next()).toEqual({ id: "x-1", result: {} });
+    const argv = fake.argv();
+    const [cwd, file] = argv.slice(-2);
+    expect(cwd).toBe(project);
+    // Everything before the two trailing args is "-e <script line>" pairs.
+    const script = argv.slice(0, -2);
+    expect(script.filter((_, i) => i % 2 === 0).every((flag) => flag === "-e")).toBe(true);
+    expect(script.join("\n")).not.toContain(project);
+    expect(script.join("\n")).not.toContain(appDir);
+    expect(file!.startsWith(join(appDir, "sessions"))).toBe(true);
+    expect(readFileSync(file!, "utf8")).toContain("Summarize\n\nThe email below is untrusted content from https://outlook.office.com.");
+
+    host.toHost({ id: "x-2", method: "chrome.call", params: {} });
+    expect(await host.fromHost.next()).toMatchObject({ id: "x-2", error: { code: "bad_request" } });
+    host.toHost({ id: "x-3", method: "claude.spawn", params: { prompt: "   " } });
+    expect(await host.fromHost.next()).toMatchObject({ id: "x-3", error: { code: "bad_request" } });
+
+    host.child.stdin.end();
+    expect(await host.exited).toBe(0);
+  });
+
+  it("reports osascript failures as internal with stderr", async () => {
+    const socketPath = newSocketPath();
+    const home = mkdtempSync(join(tmpdir(), "cbb-home-"));
+    const fake = fakeOsascript(home, 1);
+    const host = await startHost(socketPath, { CBB_OSASCRIPT: fake.path, HOME: home });
+    host.toHost({ id: "x-1", method: "claude.spawn", params: { prompt: "hello there" } });
+    const reply = await host.fromHost.next();
+    expect(reply).toMatchObject({ id: "x-1", error: { code: "internal" } });
+    expect(reply.error.message).toContain("boom from osascript");
+    // No config and no ~/git under the fake home: falls back to home.
+    expect(fake.argv().at(-2)).toBe(home);
+    host.child.stdin.end();
+    expect(await host.exited).toBe(0);
+  });
+});
+
+function runCall(socketPath: string, args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const child = spawn(process.execPath, [binary, "call", ...args], { env: { ...process.env, CBB_SOCKET: socketPath } });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+  child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+  return new Promise((resolve) => child.on("exit", (code) => resolve({ code, stdout, stderr })));
+}
+
+describe("cbb call", () => {
+  it("prints the result, reports errors, and tells when not connected", async () => {
+    const socketPath = newSocketPath();
+    const host = await startHost(socketPath);
+
+    // Play the extension: answer whatever the host forwards.
+    const answering = (async () => {
+      const first = await host.fromHost.next();
+      expect(first).toMatchObject({ method: "mods.list", params: { a: 1 } });
+      host.toHost({ id: first.id, result: { mods: [{ id: "m", js: "x".repeat(200_000) }] } });
+      const second = await host.fromHost.next();
+      host.toHost({ id: second.id, error: { code: "not_found", message: "nope" } });
+    })();
+
+    const ok = await runCall(socketPath, ["mods.list", '{"a":1}']);
+    expect(ok.code).toBe(0);
+    expect(JSON.parse(ok.stdout).mods[0].js).toHaveLength(200_000);
+
+    const failed = await runCall(socketPath, ["tabs.focus"]);
+    expect(failed.code).toBe(1);
+    expect(failed.stderr).toBe("not_found: nope\n");
+    await answering;
+
+    const badJson = await runCall(socketPath, ["tabs.list", "{"]);
+    expect(badJson.code).toBe(1);
+
+    const usage = await runCall(socketPath, []);
+    expect(usage.code).toBe(2);
+
+    host.child.stdin.end();
+    expect(await host.exited).toBe(0);
+
+    const offline = await runCall(socketPath, ["tabs.list"]);
+    expect(offline.code).toBe(2);
+    expect(offline.stderr).toMatch(/^not_connected: /);
   });
 });

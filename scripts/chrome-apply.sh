@@ -1,13 +1,24 @@
 #!/usr/bin/env bash
-# Applies chrome.yaml (Chrome preferences and extension keyboard shortcuts) to
-# the running Google Chrome, for the profile of its front window. Idempotent:
-# only values that differ are changed.
+# Applies chrome.yaml to the running Google Chrome, for the profile of its
+# front window: Chrome preferences, extension keyboard shortcuts, the Claude
+# session settings and mods (user scripts). Idempotent: only values that differ
+# are changed.
 #
-# How: Chrome's AppleScript `execute javascript` runs code in a tab. The
-# private APIs behind chrome://settings (chrome.settingsPrivate) and
-# chrome://extensions/shortcuts (chrome.developerPrivate) are only exposed on
-# those pages, so we open them as background tabs, drive them, and close them.
-# It needs "Allow JavaScript from Apple Events" (View > Developer) in Chrome.
+# How (settings, shortcuts): Chrome's AppleScript `execute javascript` runs
+# code in a tab. The private APIs behind chrome://settings
+# (chrome.settingsPrivate) and chrome://extensions/shortcuts
+# (chrome.developerPrivate) are only exposed on those pages, so we open them as
+# background tabs, drive them, and close them. It needs "Allow JavaScript from
+# Apple Events" (View > Developer) in Chrome.
+#
+# claude.cwd is written to the bridge's config.json (in the app directory,
+# see scripts/lib.sh), where the host reads it when it spawns a Claude session.
+#
+# Mods go through the bridge: `cbb call mods.*` (override the command with
+# CBB_CMD=/path/to/executable, for tests). Each mod's `file` is relative to the
+# directory of the config file. Mods registered in Chrome but missing from the
+# config are reported and left alone, never removed. If the bridge is not
+# connected the mods are reported as an error and the rest is still applied.
 #
 # Usage:
 #   scripts/chrome-apply.sh [--dry-run] [path/to/chrome.yaml]
@@ -54,6 +65,8 @@ done
 config="${config:-$REPO/chrome.yaml}"
 
 [[ "$(uname -s)" == Darwin ]] || die "macOS only"
+# shellcheck source=scripts/lib.sh
+source "$REPO/scripts/lib.sh" # APP_DIR
 command -v yq > /dev/null || die "yq not found; run 'mise install' in $REPO"
 if [[ "$mode" == apply ]]; then
   [[ -r "$config" ]] || die "cannot read $config"
@@ -322,6 +335,169 @@ if [[ "$(yq '.shortcuts | length' "$config")" != 0 ]]; then
       echo "$verb $label: ${have:-(none)} -> ${now:-(none)}"
     done < <(EXT="$ext" yq -r '.shortcuts[strenv(EXT)] | keys | .[]' "$config")
   done < <(yq -r '.shortcuts // {} | keys | .[]' "$config")
+fi
+
+# Claude ----------------------------------------------------------------------
+# Settings for Claude Code sessions the bridge spawns, kept in config.json in
+# the app directory. Other keys in that file are preserved.
+CLAUDE_CONFIG="$APP_DIR/config.json"
+want_cwd="$(yq -r '.claude.cwd // ""' "$config")"
+if [[ -n "$want_cwd" ]]; then
+  # Expand a leading ~ only; anything else must already be absolute.
+  case "$want_cwd" in
+    \~ | \~/*) want_cwd="$HOME${want_cwd:1}" ;;
+  esac
+  if [[ "$want_cwd" != /* ]]; then
+    fail "claude.cwd must be an absolute path or start with ~ (got $want_cwd)"
+  elif [[ ! -d "$want_cwd" ]]; then
+    fail "claude.cwd: directory $want_cwd does not exist"
+  else
+    want_cwd="$(cd "$want_cwd" && pwd)"
+    have_cwd=""
+    if [[ -s "$CLAUDE_CONFIG" ]]; then
+      if ! have_cwd="$(yq -p=json -r '.claude.cwd // ""' "$CLAUDE_CONFIG" 2> /dev/null)"; then
+        fail "$CLAUDE_CONFIG is not valid JSON; fix or remove it"
+        want_cwd=""
+      fi
+    fi
+    if [[ -z "$want_cwd" ]]; then
+      :
+    elif [[ "$have_cwd" == "$want_cwd" ]]; then
+      echo "unchanged  claude.cwd = $want_cwd"
+    elif $dry_run; then
+      echo "$verb claude.cwd: ${have_cwd:-(none)} -> $want_cwd"
+    else
+      mkdir -p "$APP_DIR"
+      chmod 700 "$APP_DIR"
+      tmp="$(umask 077 && mktemp "$APP_DIR/config.json.XXXXXX")"
+      if [[ -s "$CLAUDE_CONFIG" ]]; then
+        CWD="$want_cwd" yq -p=json -o=json '.claude.cwd = strenv(CWD)' "$CLAUDE_CONFIG" > "$tmp"
+      else
+        CWD="$want_cwd" yq -n -o=json '.claude.cwd = strenv(CWD)' > "$tmp"
+      fi
+      chmod 600 "$tmp"
+      mv -f "$tmp" "$CLAUDE_CONFIG"
+      echo "$verb claude.cwd: ${have_cwd:-(none)} -> $want_cwd"
+    fi
+  fi
+fi
+
+# Mods ------------------------------------------------------------------------
+# cbb_call METHOD JSON: runs `cbb call` and sets CBB_OUT (stdout) and CBB_ERR
+# (first stderr line). Returns cbb's exit status: 0 ok, 2 not connected, other
+# non-zero for an error. Never exits the script.
+if [[ -n "${CBB_CMD:-}" ]]; then
+  CBB=("$CBB_CMD")
+else
+  CBB=(node "$REPO/host/dist/cbb.js")
+fi
+cbb_call() {
+  local errfile rc=0
+  errfile="$(mktemp)"
+  CBB_OUT="$("${CBB[@]}" call "$1" "$2" 2> "$errfile")" || rc=$?
+  CBB_ERR="$(head -n 1 "$errfile")"
+  rm -f "$errfile"
+  return "$rc"
+}
+
+# mod_state JSON: the comparable fields of a registered or wanted mod, with
+# Chrome's defaults filled in, as canonical JSON.
+mod_state() {
+  yq -p=json -o=json -I=0 '{
+    "matches": (.matches // []),
+    "js": (.js | select(tag == "!!str") // ([.[]? | .code // ""] | join(""))),
+    "runAt": (.runAt // "document_idle"),
+    "world": (.world // "USER_SCRIPT")
+  } | sort_keys(.)' <<< "$1"
+}
+
+# mod_diff HAVE WANT: names of the fields that differ, comma separated.
+mod_diff() {
+  local f out=()
+  for f in matches js runAt world; do
+    [[ "$(F="$f" yq -p=json -o=json -I=0 '.[strenv(F)]' <<< "$1")" == \
+      "$(F="$f" yq -p=json -o=json -I=0 '.[strenv(F)]' <<< "$2")" ]] || out+=("${f/js/code}")
+  done
+  local IFS=,
+  printf '%s' "${out[*]}"
+}
+
+if [[ "$(yq '.mods | length' "$config")" != 0 ]]; then
+  config_dir="$(cd "$(dirname "$config")" && pwd)"
+  if cbb_call mods.list '{}'; then
+    registered="$(yq -p=json -o=json -I=0 '.mods // []' <<< "$CBB_OUT")"
+  else
+    rc=$?
+    if ((rc == 2)); then
+      fail "mods not applied: the bridge is not connected (is Chrome running with the extension on?)${CBB_ERR:+ ($CBB_ERR)}"
+    else
+      fail "mods not applied: ${CBB_ERR:-cbb call mods.list failed with status $rc}"
+    fi
+    registered=""
+  fi
+  if [[ -n "$registered" ]]; then
+    while IFS= read -r id; do
+      label="mods.$id"
+      file="$(ID="$id" yq -r '.mods[strenv(ID)].file // ""' "$config")"
+      [[ -z "$file" || "$file" == /* ]] || file="$config_dir/$file"
+      if [[ -z "$file" || ! -r "$file" ]]; then
+        fail "$label: cannot read file ${file:-(none given)}"
+        continue
+      fi
+      if [[ "$(ID="$id" yq '.mods[strenv(ID)].matches | (tag == "!!seq" and length > 0)' "$config")" != true ]]; then
+        fail "$label: matches must be a non-empty list of URL patterns"
+        continue
+      fi
+      data="$(ID="$id" F="$file" yq -o=json -I=0 '.mods[strenv(ID)] | {
+        "id": strenv(ID),
+        "matches": .matches,
+        "js": load_str(strenv(F)),
+        "runAt": (.runAt // "document_idle"),
+        "world": (.world // "USER_SCRIPT")
+      }' "$config")"
+      want="$(mod_state "$data")"
+      have_raw="$(ID="$id" yq -p=json -o=json -I=0 '[.[] | select(.id == strenv(ID))] | .[0] // null' <<< "$registered")"
+      if [[ "$have_raw" == null ]]; then
+        what="not registered"
+        done_what="registered"
+      else
+        have="$(mod_state "$have_raw")"
+        if [[ "$have" == "$want" ]]; then
+          echo "unchanged  $label"
+          continue
+        fi
+        diff="$(mod_diff "$have" "$want")"
+        what="differs in $diff"
+        done_what="updated ($diff)"
+      fi
+      if $dry_run; then
+        echo "$verb $label: $what"
+        continue
+      fi
+      if ! cbb_call mods.register "$data"; then
+        fail "could not register $label: ${CBB_ERR:-cbb call mods.register failed}"
+        continue
+      fi
+      # Read back, like the settings: the bridge must now report what we want.
+      if ! cbb_call mods.list '{}'; then
+        fail "could not read back $label: ${CBB_ERR:-cbb call mods.list failed}"
+        continue
+      fi
+      registered="$(yq -p=json -o=json -I=0 '.mods // []' <<< "$CBB_OUT")"
+      now_raw="$(ID="$id" yq -p=json -o=json -I=0 '[.[] | select(.id == strenv(ID))] | .[0] // null' <<< "$registered")"
+      if [[ "$now_raw" == null || "$(mod_state "$now_raw")" != "$want" ]]; then
+        fail "registered $label but the bridge reports something else"
+        continue
+      fi
+      echo "$verb $label: $done_what"
+    done < <(yq -r '.mods // {} | keys | .[]' "$config")
+    while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
+      if [[ "$(ID="$id" yq '.mods | has(strenv(ID))' "$config")" != true ]]; then
+        echo "extra      mods.$id is registered but not in chrome.yaml (left alone)"
+      fi
+    done < <(yq -p=json -r '.[].id' <<< "$registered")
+  fi
 fi
 
 if ((failures)); then

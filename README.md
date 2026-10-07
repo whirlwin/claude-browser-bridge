@@ -105,10 +105,44 @@ install. The source of truth is the `shortcuts` section of
 Rebinding them by hand at `chrome://extensions/shortcuts` works too, but the
 next apply puts the `chrome.yaml` values back.
 
+## Outlook: Ask Claude button
+
+[`mods/outlook-claude.js`](mods/outlook-claude.js) is a mod for Outlook on the
+web (`https://outlook.cloud.microsoft/*`). It adds a Claude button to the
+header toolbar of every expanded email, between the emoji (Reactions) button
+and Reply.
+
+Clicking it opens a small **Ask Claude** dialog next to the button: a prompt
+box, an **Include this email** checkbox (on by default), **Cancel** and **Open
+in iTerm**. `Cmd+Enter` submits, `Esc` or a click outside closes it. The bridge
+then opens a new iTerm2 tab in the current window, running an interactive
+Claude Code session in `claude.cwd` (see below) with your prompt. When the
+email is included, its subject, sender, recipients, date and body text are
+passed along, explicitly marked as untrusted content.
+
+Setup: apply `chrome.yaml` with `scripts/chrome-apply.sh` (it registers the
+mod through the bridge), and have the **Allow User Scripts** toggle on (see
+[Install](#install)) and iTerm2 installed. Reload Outlook afterwards.
+
+Be aware of what this combines: your private email, content written by
+whoever sent it (which can carry prompt injection) and a Claude that can run
+shell commands. Two things keep that in check: the button only acts on your
+own trusted click or keypress (synthetic events from page scripts or email
+content are ignored, and email HTML is never injected), and the result is an
+interactive session you watch, with Claude Code's permission prompts in front
+of every tool use. Read what it proposes before approving, especially for
+mail from people you don't know.
+
+The mod finds Outlook's elements by their English accessibility labels, so it
+does nothing in a localized Outlook. To test it without an account, open
+[`mods/test/outlook-fixture.html`](mods/test/outlook-fixture.html), a copy of
+Outlook's DOM with a stubbed bridge (see the comment at its top).
+
 ## Declarative Chrome config
 
-[`chrome.yaml`](chrome.yaml) declares Chrome preferences and extension keyboard
-shortcuts; `scripts/chrome-apply.sh` makes Chrome match it:
+[`chrome.yaml`](chrome.yaml) declares Chrome preferences, extension keyboard
+shortcuts, where browser-spawned Claude sessions run, and mods;
+`scripts/chrome-apply.sh` makes Chrome match it:
 
 ```yaml
 settings:
@@ -116,6 +150,14 @@ settings:
 shortcuts:
   Claude Browser Bridge:             # extension name, exactly as installed
     select-next-tab: Command+J       # command name: manifest-style keybinding
+claude:
+  cwd: ~/git                         # working directory of spawned Claude sessions
+mods:
+  outlook-claude:                    # mod id
+    matches: ["https://outlook.cloud.microsoft/*"]
+    file: mods/outlook-claude.js     # relative to the chrome.yaml directory
+    runAt: document_idle             # optional, the default
+    world: USER_SCRIPT               # optional, the default
 ```
 
 ```sh
@@ -132,16 +174,31 @@ command is reported, the rest is still applied, and the exit status is non-zero.
 Keybindings use the manifest format (`Command+J`, `Alt+Shift+K`, `MacCtrl+L`;
 on macOS `Ctrl` means Command); an empty value clears a shortcut.
 
+`claude.cwd` must be an existing directory (a leading `~` is expanded). It is
+written as an absolute path to
+`~/Library/Application Support/claude-browser-bridge/config.json` (directory
+`0700`, file `0600`, other keys kept), where the host reads it when it spawns a
+Claude session.
+
+`mods` are registered through the bridge (`cbb call mods.list` and
+`mods.register`), so the extension must be connected and **Allow User
+Scripts** on. A mod whose matches, code, `runAt` or `world` differ from the
+registered one is re-registered. Mods registered in Chrome but missing from
+`chrome.yaml` are reported as `extra` and left alone; nothing is ever
+unregistered (use the `mods_unregister` tool for that). If the bridge is not
+connected the mods are reported as an error, the rest is still applied and the
+exit status is non-zero.
+
 Requirements: macOS, `yq` (`mise install` in this repo), Google Chrome already
 running (the script never launches it) and **View > Developer > Allow
 JavaScript from Apple Events** turned on in Chrome. It applies to the profile
 of the front Chrome window.
 
-It does not use the bridge. It drives Chrome through AppleScript: it opens
-`chrome://settings` and `chrome://extensions/shortcuts` as background tabs,
-calls the private APIs those pages expose (`chrome.settingsPrivate`,
-`chrome.developerPrivate`) with `execute javascript`, and closes the tabs again
-(only the ones it opened).
+Settings and shortcuts do not use the bridge. For them the script drives
+Chrome through AppleScript: it opens `chrome://settings` and
+`chrome://extensions/shortcuts` as background tabs, calls the private APIs
+those pages expose (`chrome.settingsPrivate`, `chrome.developerPrivate`) with
+`execute javascript`, and closes the tabs again (only the ones it opened).
 
 ## Security
 

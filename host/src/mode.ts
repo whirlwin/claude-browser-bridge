@@ -1,10 +1,13 @@
-export type Mode = "host" | "mcp";
+export type Mode = "host" | "mcp" | "call";
 
 export const USAGE = `Usage: cbb <mode>
 
 Modes:
-  host   Native messaging host, started by Chrome
-  mcp    MCP server over stdio, started by Claude Code
+  host                          Native messaging host, started by Chrome
+  mcp                           MCP server over stdio, started by Claude Code
+  call <method> [json-params]   Send one request to the bridge and print the
+                                result as JSON (exit 1 on error, 2 if the
+                                browser is not connected)
 `;
 
 /**
@@ -14,5 +17,5 @@ Modes:
  */
 export function parseMode(args: readonly string[]): Mode | undefined {
   const [first] = args;
-  return first === "host" || first === "mcp" ? first : undefined;
+  return first === "host" || first === "mcp" || first === "call" ? first : undefined;
 }

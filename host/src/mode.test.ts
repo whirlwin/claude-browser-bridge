@@ -5,6 +5,7 @@ describe("parseMode", () => {
   it("accepts the known modes", () => {
     expect(parseMode(["host"])).toBe("host");
     expect(parseMode(["mcp"])).toBe("mcp");
+    expect(parseMode(["call", "tabs.list"])).toBe("call");
   });
 
   it("ignores the extra arguments Chrome appends", () => {

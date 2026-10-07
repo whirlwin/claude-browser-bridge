@@ -6,6 +6,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import { encodeMessage, MessageDecoder, MessageTooLargeError, MAX_OUTGOING_BYTES } from "./framing";
 import { errorResponse, isObject, type RequestId, type Response } from "./protocol";
 import { ensureSocketDir, socketPath } from "./socket-path";
+import { SpawnError, spawnClaude } from "./spawn";
 
 /** A socket line this long cannot become a valid native message anyway. */
 const MAX_LINE_BYTES = 2 * MAX_OUTGOING_BYTES;
@@ -18,6 +19,9 @@ const SHUTDOWN_GRACE_MS = 1000;
  * than the MCP side's longest timeout (120s), which has given up by then.
  */
 const PENDING_TIMEOUT_MS = 150_000;
+
+/** Ids of requests the extension sends to the host, not the other way round. */
+const EXTENSION_ID_PREFIX = "x-";
 
 /** sun_path is 104 bytes on macOS and 108 on Linux, including the NUL. */
 const MAX_SOCKET_PATH_BYTES = process.platform === "darwin" ? 103 : 107;
@@ -111,6 +115,10 @@ export function runHost(): void {
       // Other events have no consumer yet.
       return;
     }
+    if (typeof message.method === "string" && message.id.startsWith(EXTENSION_ID_PREFIX)) {
+      void handleExtensionRequest(message.id, message.method, message.params);
+      return;
+    }
     const entry = pending.get(message.id);
     if (!entry) {
       log(`dropping response for unknown or abandoned id ${message.id}`);
@@ -119,6 +127,31 @@ export function runHost(): void {
     pending.delete(message.id);
     clearTimeout(entry.timer);
     send(entry.client, { ...message, id: entry.originalId } as Response);
+  }
+
+  // Requests the extension starts itself (on behalf of a mod), as opposed to
+  // replies to socket clients. Only an allowlist of methods is served.
+  async function handleExtensionRequest(id: string, method: string, params: unknown): Promise<void> {
+    let response: Response;
+    if (method !== "claude.spawn") {
+      response = errorResponse(id, "bad_request", `Unknown extension request: ${method}`);
+    } else {
+      try {
+        const { file, cwd } = await spawnClaude(params);
+        log(`spawned Claude in ${cwd} with prompt file ${file}`);
+        response = { id, result: {} };
+      } catch (error) {
+        const code = error instanceof SpawnError ? error.code : "internal";
+        response = errorResponse(id, code, (error as Error).message);
+        log(`claude.spawn failed: ${response.error!.message}`);
+      }
+    }
+    if (shuttingDown) return;
+    try {
+      process.stdout.write(encodeMessage(response));
+    } catch (error) {
+      log(`could not reply to ${id}: ${(error as Error).message}`);
+    }
   }
 
   function handleClient(socket: Socket): void {
